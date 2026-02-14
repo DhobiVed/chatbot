@@ -1,12 +1,6 @@
-streamlit
+streamlit==1.54.0
 groq
-torch
-docx
-python-docx
-pdfplumber
-nltk
 python-dotenv
-sklearn
-scikit-learn
-transformers
+pdfplumber
+python-docx
 pillow
