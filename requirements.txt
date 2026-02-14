@@ -1,0 +1,12 @@
+streamlit
+groq
+torch
+docx
+python-docx
+pdfplumber
+nltk
+python-dotenv
+sklearn
+scikit-learn
+transformers
+pillow
