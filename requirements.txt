@@ -5,3 +5,4 @@ pdfplumber
 python-docx
 pillow
 fpdf2
+requests
