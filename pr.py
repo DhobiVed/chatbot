@@ -656,11 +656,9 @@ import os
 import pdfplumber
 from docx import Document
 from fpdf import FPDF
-import base64
 import re
 import shutil
 import requests
-from collections import defaultdict
 
 # ===== CONFIG =====
 st.set_page_config(
@@ -669,7 +667,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ===== GROQ API KEY – HARDCODED (FOR TESTING ONLY) =====
+# ===== GROQ API KEY =====
 GROQ_API_KEY = "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"
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -684,7 +682,6 @@ MAX_HISTORY = 20
 MAX_CHUNK_SIZE = 1000
 MAX_CHUNKS_TO_USE = 3
 
-
 # ===== PERSISTENCE =====
 def load_json(file, default):
     if os.path.exists(file):
@@ -692,54 +689,50 @@ def load_json(file, default):
             return json.load(f)
     return default
 
-
 def save_json(file, data):
     with open(file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-
 def load_chats():
     return load_json(CHATS_FILE, {})
-
 
 def save_chats():
     save_json(CHATS_FILE, st.session_state.chats)
     shutil.copy(CHATS_FILE, BACKUP_FILE)
 
-
 def load_bookmarks():
     return load_json(BOOKMARKS_FILE, [])
-
 
 def save_bookmarks():
     save_json(BOOKMARKS_FILE, st.session_state.bookmarks)
 
-
 def load_memory():
     return load_json(MEMORY_FILE, {"notes": [], "facts": []})
-
 
 def save_memory():
     save_json(MEMORY_FILE, st.session_state.memory)
 
-
 def load_usage():
     return load_json(USAGE_FILE, {"daily": {}, "total_messages": 0})
-
 
 def save_usage():
     save_json(USAGE_FILE, st.session_state.usage)
 
-
 def delete_oldest_chat():
     if len(st.session_state.chats) > MAX_CHATS:
-        oldest_cid = min(st.session_state.chats.keys(),
-                         key=lambda cid: st.session_state.chats[cid]["created"])
+        oldest_cid = min(
+            st.session_state.chats.keys(),
+            key=lambda cid: st.session_state.chats[cid]["created"]
+        )
         del st.session_state.chats[oldest_cid]
 
-
 # ===== SESSION STATE INIT =====
-if "chats" not in st.session_state:
+# FIX: Use a single 'initialized' flag so this only runs ONCE per session,
+# not on every Streamlit rerun (which caused state corruption + duplicates).
+def init_session_state():
+    if "initialized" in st.session_state:
+        return
+
     st.session_state.chats = load_chats()
     if not st.session_state.chats:
         cid = str(int(time.time()))
@@ -747,7 +740,11 @@ if "chats" not in st.session_state:
             cid: {
                 "title": "New Chat",
                 "created": datetime.now().isoformat(),
-                "system_prompt": "You are Nova, a highly accurate and factual AI assistant. Think step-by-step. Give concise, truthful answers. If unsure, say you don't know.",
+                "system_prompt": (
+                    "You are Nova, a highly accurate and factual AI assistant. "
+                    "Think step-by-step. Give concise, truthful answers. "
+                    "If unsure, say you don't know."
+                ),
                 "messages": [],
                 "memory": {"user_name": "User"},
                 "document_text": None,
@@ -769,16 +766,18 @@ if "chats" not in st.session_state:
         st.session_state.current = next(iter(st.session_state.chats))
 
     st.session_state.stop_generation = False
-    st.session_state.regenerate_target = None
+    st.session_state.do_regenerate = False
     st.session_state.theme = "dark"
-    st.session_state.user_name = st.session_state.chats[st.session_state.current]["memory"].get("user_name", "User")
+    st.session_state.user_name = (
+        st.session_state.chats[st.session_state.current]["memory"].get("user_name", "User")
+    )
     st.session_state.document_context_enabled = False
     st.session_state.web_mode = False
     st.session_state.emotion = None
-
     st.session_state.bookmarks = load_bookmarks()
     st.session_state.memory = load_memory()
     st.session_state.usage = load_usage()
+
     today_str = date.today().isoformat()
     if today_str not in st.session_state.usage["daily"]:
         st.session_state.usage["daily"][today_str] = {
@@ -787,6 +786,10 @@ if "chats" not in st.session_state:
             "time_seconds": 0
         }
     st.session_state.session_start = time.time()
+    st.session_state.initialized = True
+
+
+init_session_state()
 
 
 # ===== HELPER FUNCTIONS =====
@@ -795,7 +798,11 @@ def new_chat():
     st.session_state.chats[cid] = {
         "title": "New Chat",
         "created": datetime.now().isoformat(),
-        "system_prompt": "You are Nova, a highly accurate and factual AI assistant. Think step-by-step. Give concise, truthful answers. If unsure, say you don't know.",
+        "system_prompt": (
+            "You are Nova, a highly accurate and factual AI assistant. "
+            "Think step-by-step. Give concise, truthful answers. "
+            "If unsure, say you don't know."
+        ),
         "messages": [],
         "memory": {"user_name": st.session_state.user_name},
         "document_text": None,
@@ -810,10 +817,11 @@ def new_chat():
 def delete_chat(cid):
     if cid in st.session_state.chats:
         del st.session_state.chats[cid]
-    if st.session_state.current == cid and st.session_state.chats:
-        st.session_state.current = next(iter(st.session_state.chats))
-    else:
-        new_chat()
+    if st.session_state.current == cid:
+        if st.session_state.chats:
+            st.session_state.current = next(iter(st.session_state.chats))
+        else:
+            new_chat()
     save_chats()
     st.rerun()
 
@@ -825,15 +833,28 @@ def rename_chat(cid, new_title):
 
 
 def add_msg(role, content):
+    """
+    FIX: Add a message only if it's not a duplicate of the last message.
+    This is the primary guard against double-saving assistant replies.
+    """
     chat = st.session_state.chats[st.session_state.current]
-    msg = {
+    msgs = chat["messages"]
+
+    # Strict duplicate check: same role AND same content as last msg
+    if msgs and msgs[-1]["role"] == role and msgs[-1]["content"] == content:
+        return
+
+    msgs.append({
         "role": role,
         "content": content,
         "timestamp": datetime.now().isoformat()
-    }
-    chat["messages"].append(msg)
+    })
 
     today_str = date.today().isoformat()
+    if today_str not in st.session_state.usage["daily"]:
+        st.session_state.usage["daily"][today_str] = {
+            "messages": 0, "questions": 0, "time_seconds": 0
+        }
     st.session_state.usage["daily"][today_str]["messages"] += 1
     if role == "user":
         st.session_state.usage["daily"][today_str]["questions"] += 1
@@ -841,7 +862,7 @@ def add_msg(role, content):
     save_usage()
 
     if role == "user" and not chat["title_generated"]:
-        user_msgs = [m for m in chat["messages"] if m["role"] == "user"]
+        user_msgs = [m for m in msgs if m["role"] == "user"]
         if len(user_msgs) >= 2:
             generate_chat_title(st.session_state.current)
 
@@ -850,8 +871,13 @@ def add_msg(role, content):
 
 def generate_chat_title(cid):
     chat = st.session_state.chats[cid]
-    conversation = "\n".join([f"{m['role']}: {m['content']}" for m in chat["messages"][:4]])
-    prompt = f"Based on this conversation, generate a very short title (max 3 words) that summarizes the topic:\n\n{conversation}\n\nTitle:"
+    conversation = "\n".join(
+        [f"{m['role']}: {m['content']}" for m in chat["messages"][:4]]
+    )
+    prompt = (
+        f"Based on this conversation, generate a very short title (max 3 words) "
+        f"that summarizes the topic:\n\n{conversation}\n\nTitle:"
+    )
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -869,7 +895,11 @@ def generate_chat_title(cid):
 
 
 def detect_emotion(text):
-    prompt = f"Classify the emotion of the following user message into one word: happy, sad, angry, stressed, confused, curious, excited, or neutral. Only output the emotion word.\n\nMessage: {text}\n\nEmotion:"
+    prompt = (
+        "Classify the emotion of the following user message into one word: "
+        "happy, sad, angry, stressed, confused, curious, excited, or neutral. "
+        f"Only output the emotion word.\n\nMessage: {text}\n\nEmotion:"
+    )
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -879,26 +909,60 @@ def detect_emotion(text):
         )
         emotion = response.choices[0].message.content.strip().lower()
         valid = ["happy", "sad", "angry", "stressed", "confused", "curious", "excited", "neutral"]
-        if emotion not in valid:
-            emotion = "neutral"
-        return emotion
+        return emotion if emotion in valid else "neutral"
     except:
         return "neutral"
 
 
+def detect_web_intent(query):
+    """
+    Detect if a query needs weather or news data, and extract the topic/city.
+    Returns: ("weather", city) | ("news", topic) | (None, None)
+    """
+    q = query.lower()
+
+    # Weather intent keywords
+    weather_keywords = ["weather", "temperature", "forecast", "humid", "raining",
+                        "sunny", "cloudy", "wind", "hot outside", "cold outside",
+                        "what's it like in", "how's the weather", "degrees"]
+    is_weather = any(kw in q for kw in weather_keywords)
+
+    # News intent keywords
+    news_keywords = ["news", "latest", "headlines", "happening", "today in",
+                     "recent", "update", "breaking", "current events"]
+    is_news = any(kw in q for kw in news_keywords)
+
+    if is_weather:
+        # Extract city: remove noise words to isolate city name
+        noise = ["weather", "what", "is", "the", "in", "at", "for", "today",
+                 "tomorrow", "like", "how", "whats", "what's", "tell", "me",
+                 "current", "now", "temperature", "forecast", "degrees", "please"]
+        words = [w for w in re.findall(r"[a-z]+", q) if w not in noise]
+        city = " ".join(words).strip() if words else "London"
+        return ("weather", city)
+
+    if is_news:
+        # Extract topic: strip generic news words to get the subject
+        noise = ["news", "latest", "tell", "me", "about", "the", "what", "is",
+                 "are", "any", "recent", "updates", "headlines", "today", "show"]
+        words = [w for w in re.findall(r"[a-z]+", q) if w not in noise]
+        topic = " ".join(words).strip() if words else query
+        return ("news", topic)
+
+    return (None, None)
+
+
 def web_search(query, search_type="news"):
-    """
-    Real-time web search using hardcoded API keys.
-    """
-    # Hardcoded keys – replace with your own if needed
     NEWS_API_KEY = "5167a3decb8b4fb78fcf7ac1446e5e6e"
     WEATHER_API_KEY = "6890236208c02c0adf36ba6fdbab1712"
 
     try:
         if search_type == "news":
+            # Use full query as topic for better results
+            topic = query.strip() or "top news"
             url = "https://newsapi.org/v2/everything"
             params = {
-                "q": query,
+                "q": topic,
                 "apiKey": NEWS_API_KEY,
                 "pageSize": 5,
                 "sortBy": "relevancy",
@@ -906,55 +970,42 @@ def web_search(query, search_type="news"):
             }
             response = requests.get(url, params=params, timeout=10)
             data = response.json()
-
             if data.get("status") == "ok" and data.get("articles"):
                 articles = data["articles"][:3]
-                result = "**📰 Latest News:**\n\n"
+                result = f"REAL-TIME NEWS DATA (fetched live right now) about '{topic}':\n\n"
                 for i, article in enumerate(articles, 1):
-                    result += f"{i}. **{article['title']}**\n"
-                    result += f"   {article['description']}\n"
-                    result += f"   [Read more]({article['url']})\n\n"
+                    result += f"{i}. {article['title']}\n"
+                    if article.get("description"):
+                        result += f"   Summary: {article['description']}\n"
+                    result += f"   Source: {article.get('source', {}).get('name', 'Unknown')}\n"
+                    result += f"   URL: {article['url']}\n\n"
                 return result
             else:
-                return f"⚠️ No news found for '{query}'. Try a different term."
+                return f"NEWS API returned no results for '{topic}'. Status: {data.get('status')} | Code: {data.get('code')}"
 
         elif search_type == "weather":
-            city = query.lower().replace("weather", "").replace("in", "").strip()
-            if not city:
-                city = "London"
-
+            city = query.strip() if query.strip() else "London"
             url = "https://api.openweathermap.org/data/2.5/weather"
-            params = {
-                "q": city,
-                "appid": WEATHER_API_KEY,
-                "units": "metric"
-            }
+            params = {"q": city, "appid": WEATHER_API_KEY, "units": "metric"}
             response = requests.get(url, params=params, timeout=10)
             data = response.json()
-
             if data.get("cod") == 200:
-                temp = data["main"]["temp"]
-                feels_like = data["main"]["feels_like"]
-                humidity = data["main"]["humidity"]
-                description = data["weather"][0]["description"]
-                wind_speed = data["wind"]["speed"]
-                city_name = data["name"]
-                country = data["sys"]["country"]
-
-                return f"""
-**☁️ Weather in {city_name}, {country}**
-- **Condition:** {description.capitalize()}
-- **Temperature:** {temp}°C (feels like {feels_like}°C)
-- **Humidity:** {humidity}%
-- **Wind Speed:** {wind_speed} m/s
-                """
+                return (
+                    f"REAL-TIME WEATHER DATA (fetched live right now) for {data['name']}, {data['sys']['country']}:\n"
+                    f"Condition: {data['weather'][0]['description'].capitalize()}\n"
+                    f"Temperature: {data['main']['temp']}°C (feels like {data['main']['feels_like']}°C)\n"
+                    f"Min/Max: {data['main']['temp_min']}°C / {data['main']['temp_max']}°C\n"
+                    f"Humidity: {data['main']['humidity']}%\n"
+                    f"Wind Speed: {data['wind']['speed']} m/s\n"
+                    f"Visibility: {data.get('visibility', 'N/A')} meters"
+                )
             else:
-                return f"⚠️ Could not find weather for '{city}'. Check the city name."
+                return f"WEATHER API error for city '{city}': {data.get('message', 'Unknown error')}. Try a different city name."
 
     except requests.exceptions.RequestException as e:
-        return f"⚠️ Network error: {str(e)}"
+        return f"NETWORK ERROR fetching real-time data: {str(e)}"
     except Exception as e:
-        return f"⚠️ Unexpected error: {str(e)}"
+        return f"ERROR fetching real-time data: {str(e)}"
 
 
 def retrieve_memory(query):
@@ -977,7 +1028,6 @@ def add_to_memory(content, category="notes"):
 
 
 def update_system_prompt(new_prompt):
-    """Update the system prompt for the current chat."""
     st.session_state.chats[st.session_state.current]["system_prompt"] = new_prompt
     save_chats()
 
@@ -1021,17 +1071,17 @@ def chunk_text(text, chunk_size=MAX_CHUNK_SIZE):
 def get_relevant_chunks(query, chunks, top_n=MAX_CHUNKS_TO_USE):
     if not chunks:
         return []
-    query_words = set(re.findall(r'\w+', query.lower()))
-    stopwords = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of", "with", "by", "and",
-                 "or", "but"}
-    query_words = query_words - stopwords
+    stopwords = {
+        "the", "a", "an", "is", "are", "was", "were", "in", "on",
+        "at", "to", "for", "of", "with", "by", "and", "or", "but"
+    }
+    query_words = set(re.findall(r'\w+', query.lower())) - stopwords
     if not query_words:
         return chunks[:top_n]
     scores = []
     for chunk in chunks:
         chunk_words = set(re.findall(r'\w+', chunk.lower()))
-        common = query_words.intersection(chunk_words)
-        scores.append(len(common))
+        scores.append(len(query_words.intersection(chunk_words)))
     top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_n]
     return [chunks[i] for i in top_indices if scores[i] > 0]
 
@@ -1040,32 +1090,57 @@ def get_messages_for_api(user_input=None):
     chat = st.session_state.chats[st.session_state.current]
     messages = []
 
+    # Document context
     if st.session_state.document_context_enabled and chat.get("document_text"):
         last_user = user_input or (
-            chat["messages"][-1]["content"] if chat["messages"] and chat["messages"][-1]["role"] == "user" else "")
+            chat["messages"][-1]["content"]
+            if chat["messages"] and chat["messages"][-1]["role"] == "user"
+            else ""
+        )
         if last_user and chat.get("document_chunks"):
             relevant = get_relevant_chunks(last_user, chat["document_chunks"])
             if relevant:
                 doc_context = "Relevant parts of the uploaded document:\n\n" + "\n\n---\n\n".join(relevant)
                 messages.append({"role": "system", "content": doc_context})
             elif chat["document_chunks"]:
-                messages.append(
-                    {"role": "system", "content": "Document content (first part):\n\n" + chat["document_chunks"][0]})
+                messages.append({
+                    "role": "system",
+                    "content": "Document content (first part):\n\n" + chat["document_chunks"][0]
+                })
 
+    # Memory context
     if user_input:
         memory_hits = retrieve_memory(user_input)
         if memory_hits:
-            memory_context = "Relevant information from your personal memory:\n" + "\n".join(memory_hits)
-            messages.append({"role": "system", "content": memory_context})
+            messages.append({
+                "role": "system",
+                "content": "Relevant information from your personal memory:\n" + "\n".join(memory_hits)
+            })
 
+    # Emotion context
     if st.session_state.emotion and st.session_state.emotion != "neutral":
-        messages.append({"role": "system",
-                         "content": f"The user seems {st.session_state.emotion}. Respond with empathy and adapt your tone accordingly."})
+        messages.append({
+            "role": "system",
+            "content": (
+                f"The user seems {st.session_state.emotion}. "
+                "Respond with empathy and adapt your tone accordingly."
+            )
+        })
 
-    messages.append({"role": "system", "content": chat["system_prompt"]})
+    # System prompt — append real-time instruction when web mode is on
+    base_prompt = chat["system_prompt"]
+    if st.session_state.web_mode:
+        base_prompt += (
+            "\n\nIMPORTANT: When the conversation contains a message starting with "
+            "'REAL-TIME WEATHER DATA' or 'REAL-TIME NEWS DATA', you MUST use ONLY "
+            "that data to answer. Do NOT say you lack real-time access. "
+            "Do NOT suggest checking other websites. Present the provided data "
+            "clearly and directly as the answer."
+        )
+    messages.append({"role": "system", "content": base_prompt})
 
-    history = chat["messages"][-MAX_HISTORY:]
-    for m in history:
+    # Chat history
+    for m in chat["messages"][-MAX_HISTORY:]:
         messages.append({"role": m["role"], "content": m["content"]})
 
     return messages
@@ -1077,7 +1152,7 @@ def export_chat_as_markdown(cid):
     lines = [f"# {chat['title']}\n", f"*Created: {chat['created']}*\n"]
     for msg in chat["messages"]:
         role = "**User**" if msg["role"] == "user" else "**Nova**"
-        ts = msg.get("timestamp", "")[:16] if "timestamp" in msg else ""
+        ts = msg.get("timestamp", "")[:16]
         lines.append(f"\n{role} ({ts}): {msg['content']}\n")
     return "\n".join(lines)
 
@@ -1091,10 +1166,54 @@ def export_chat_as_pdf(cid):
     pdf.ln(10)
     for msg in chat["messages"]:
         role = "User: " if msg["role"] == "user" else "Nova: "
-        ts = msg.get("timestamp", "")[:16] if "timestamp" in msg else ""
+        ts = msg.get("timestamp", "")[:16]
         pdf.multi_cell(0, 10, txt=f"{role}({ts}) {msg['content']}")
         pdf.ln(5)
     return pdf.output(dest='S').encode('latin1')
+
+
+# ===== STREAMING HELPER =====
+def run_stream(messages_for_api, model, temperature):
+    """
+    FIX: Stream response into a placeholder for live preview,
+    then CLEAR the placeholder before returning.
+    This prevents the streamed text from persisting on screen
+    and being rendered again when st.rerun() draws history.
+    """
+    placeholder = st.empty()
+    reply = ""
+    st.session_state.stop_generation = False
+
+    try:
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages_for_api,
+            stream=True,
+            temperature=temperature,
+            top_p=0.1,
+            max_tokens=1024
+        )
+        for chunk in stream:
+            if st.session_state.get("stop_generation", False):
+                stream.close()
+                break
+            delta = chunk.choices[0].delta.content
+            if delta:
+                reply += delta
+                # Show live streaming preview with cursor
+                placeholder.markdown(f"""
+                <div class="chat-message assistant">
+                    <div class="avatar">✨</div>
+                    <div class="bubble assistant-bubble">{reply}▌</div>
+                </div>
+                """, unsafe_allow_html=True)
+    finally:
+        # CRITICAL FIX: Clear the streaming placeholder.
+        # After st.rerun(), the saved message in history will render instead.
+        # Without this, BOTH the placeholder AND the history message show = duplicate.
+        placeholder.empty()
+
+    return reply.strip()
 
 
 # ===== THEME CSS =====
@@ -1106,8 +1225,6 @@ def get_theme_css():
         .assistant-bubble { background:#1e293b; border:1px solid #334155; color:#e5e7eb; }
         section[data-testid="stSidebar"] { background:#020617; border-right:1px solid #1f2937; }
         .stChatInput input { background:#020617 !important; color:white !important; border:1px solid #334155 !important; }
-        .copy-btn { background: transparent; border: 1px solid #555; color: #ccc; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; margin-left: 10px; }
-        .copy-btn:hover { background: #333; }
         </style>
         """
     else:
@@ -1118,54 +1235,50 @@ def get_theme_css():
         section[data-testid="stSidebar"] { background: #f1f5f9; border-right:1px solid #cbd5e1; }
         .stChatInput input { background: white !important; color: black !important; border:1px solid #cbd5e1 !important; }
         .chat-header { -webkit-text-fill-color: #0f172a; background: none; }
-        .copy-btn { background: transparent; border: 1px solid #aaa; color: #333; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; margin-left: 10px; }
-        .copy-btn:hover { background: #ddd; }
         </style>
         """
 
 
 st.markdown(get_theme_css(), unsafe_allow_html=True)
 
-# Base CSS
 st.markdown("""
 <style>
-.chat-header { text-align:center; font-size:34px; font-weight:800; margin-bottom:10px; }
-.chat-message { display:flex; align-items:flex-end; margin:14px 0; animation:fadeIn .25s ease-in; }
-@keyframes fadeIn { from {opacity:0; transform:translateY(6px);} to {opacity:1; transform:translateY(0);} }
+.chat-header {
+    text-align:center; font-size:34px; font-weight:800; margin-bottom:10px;
+}
+.chat-message {
+    display:flex; align-items:flex-end; margin:14px 0;
+    animation:fadeIn .25s ease-in;
+}
+@keyframes fadeIn {
+    from {opacity:0; transform:translateY(6px);}
+    to {opacity:1; transform:translateY(0);}
+}
 .avatar { font-size:22px; margin:0 8px; }
 .user { justify-content:flex-end; }
 .assistant { justify-content:flex-start; }
-.bubble { max-width:70%; padding:14px 18px; border-radius:18px; font-size:15px; line-height:1.6; position: relative; }
-.user-bubble { background:linear-gradient(135deg,#2563eb,#7c3aed); color:white; border-bottom-right-radius:6px; }
+.bubble {
+    max-width:70%; padding:14px 18px; border-radius:18px;
+    font-size:15px; line-height:1.6; position: relative;
+}
+.user-bubble {
+    background:linear-gradient(135deg,#2563eb,#7c3aed);
+    color:white; border-bottom-right-radius:6px;
+}
 .assistant-bubble { border-bottom-left-radius:6px; }
 .timestamp { font-size: 10px; opacity: 0.6; margin-top: 5px; text-align: right; }
 .stButton>button { border-radius:12px; }
-.chat-controls { display:flex; gap:5px; margin-top:5px; }
-.chat-controls button { background:transparent; border:none; color:#aaa; cursor:pointer; font-size:12px; }
-.chat-controls button:hover { color:white; }
-.bookmark-btn { background:transparent; border:none; color:#ffaa00; cursor:pointer; font-size:14px; margin-left:10px; }
-.bookmark-btn:hover { color:#ffcc00; }
 </style>
 """, unsafe_allow_html=True)
 
-# JavaScript for copy button (optional – the reliable st.button fallback is below)
-st.markdown("""
-<script>
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(function() {
-        alert('Copied to clipboard!');
-    }, function() {
-        alert('Failed to copy');
-    });
-}
-</script>
-""", unsafe_allow_html=True)
 
 # ===== SIDEBAR =====
 with st.sidebar:
     st.title("✨ Nova Advanced")
 
-    st.session_state.user_name = st.text_input("Your name", value=st.session_state.user_name)
+    st.session_state.user_name = st.text_input(
+        "Your name", value=st.session_state.user_name
+    )
     if st.button("Remember me"):
         for cid in st.session_state.chats:
             st.session_state.chats[cid]["memory"]["user_name"] = st.session_state.user_name
@@ -1181,9 +1294,9 @@ with st.sidebar:
     st.divider()
 
     for cid, data in sorted(
-            st.session_state.chats.items(),
-            key=lambda x: x[1]["created"],
-            reverse=True
+        st.session_state.chats.items(),
+        key=lambda x: x[1]["created"],
+        reverse=True
     ):
         col1, col2, col3 = st.columns([6, 1, 1])
         with col1:
@@ -1198,7 +1311,9 @@ with st.sidebar:
                 delete_chat(cid)
 
         if st.session_state.get(f"renaming_{cid}", False):
-            new_name = st.text_input("New name", value=data["title"], key=f"rename_input_{cid}")
+            new_name = st.text_input(
+                "New name", value=data["title"], key=f"rename_input_{cid}"
+            )
             if st.button("Save", key=f"save_rename_{cid}"):
                 rename_chat(cid, new_name)
                 st.session_state[f"renaming_{cid}"] = False
@@ -1208,15 +1323,20 @@ with st.sidebar:
 
     model = st.selectbox(
         "Model",
-        ["llama-3.3-70b-versatile",
-         "mixtral-8x7b-32768",
-         "gemma2-9b-it",
-         "llama-3.1-8b-instant"],
+        [
+            "llama-3.3-70b-versatile",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+            "llama-3.1-8b-instant"
+        ],
         index=0
     )
     temperature = st.slider("Temperature", 0.0, 2.0, 0.0, 0.1)
 
-    theme_choice = st.radio("Theme", ["dark", "light"], index=0 if st.session_state.theme == "dark" else 1)
+    theme_choice = st.radio(
+        "Theme", ["dark", "light"],
+        index=0 if st.session_state.theme == "dark" else 1
+    )
     if theme_choice != st.session_state.theme:
         st.session_state.theme = theme_choice
         st.rerun()
@@ -1224,18 +1344,15 @@ with st.sidebar:
     st.divider()
 
     mode = st.selectbox("Mode", ["General", "Study", "Coding", "Interview", "Fun"])
-    if mode == "Study":
-        sys_prompt = "You are a study assistant. Provide clear explanations and examples. Be concise."
-    elif mode == "Coding":
-        sys_prompt = "You are a coding expert. Give clean, efficient code with explanations."
-    elif mode == "Interview":
-        sys_prompt = "You are an interview coach. Ask relevant questions and provide feedback."
-    elif mode == "Fun":
-        sys_prompt = "You are a fun and creative assistant. Be witty and engaging."
-    else:
-        sys_prompt = "You are Nova, a helpful assistant. Be accurate and concise."
+    mode_prompts = {
+        "General": "You are Nova, a helpful assistant. Be accurate and concise.",
+        "Study":   "You are a study assistant. Provide clear explanations and examples. Be concise.",
+        "Coding":  "You are a coding expert. Give clean, efficient code with explanations.",
+        "Interview": "You are an interview coach. Ask relevant questions and provide feedback.",
+        "Fun":     "You are a fun and creative assistant. Be witty and engaging."
+    }
     if st.button("Apply Mode"):
-        update_system_prompt(sys_prompt)
+        update_system_prompt(mode_prompts[mode])
         st.success(f"Switched to {mode} mode")
 
     st.divider()
@@ -1243,13 +1360,16 @@ with st.sidebar:
     with st.expander("System Prompt (advanced)"):
         current_system = st.session_state.chats[st.session_state.current]["system_prompt"]
         new_system = st.text_area("Edit", value=current_system, height=100)
-        if st.button("Update"):
+        if st.button("Update Prompt"):
             update_system_prompt(new_system)
+            st.success("Prompt updated!")
 
     st.divider()
 
     st.subheader("📄 Document Q&A")
-    uploaded_file = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf", "docx", "txt"])
+    uploaded_file = st.file_uploader(
+        "Upload PDF, DOCX, or TXT", type=["pdf", "docx", "txt"]
+    )
     if uploaded_file is not None:
         with st.spinner("Extracting and chunking text..."):
             text = extract_text_from_file(uploaded_file)
@@ -1280,38 +1400,53 @@ with st.sidebar:
     st.divider()
 
     with st.expander("📝 Resume & SOP Helper"):
-        resume_file = st.file_uploader("Upload Resume (PDF/DOCX/TXT)", type=["pdf", "docx", "txt"], key="resume")
+        resume_file = st.file_uploader(
+            "Upload Resume (PDF/DOCX/TXT)", type=["pdf", "docx", "txt"], key="resume"
+        )
         if resume_file:
-            text = extract_text_from_file(resume_file)
+            resume_text = extract_text_from_file(resume_file)
             if st.button("Improve Resume"):
                 with st.spinner("AI is improving your resume..."):
-                    prompt = f"Improve the following resume: correct grammar, suggest better phrasing, format it nicely. Keep the original information but enhance it.\n\n{text[:5000]}"
-                    response = client.chat.completions.create(
+                    r_prompt = (
+                        "Improve the following resume: correct grammar, suggest better phrasing, "
+                        "format it nicely. Keep the original information but enhance it.\n\n"
+                        + resume_text[:5000]
+                    )
+                    r_response = client.chat.completions.create(
                         model=model,
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=[{"role": "user", "content": r_prompt}],
                         temperature=0.3,
                         max_tokens=2000
                     )
-                    improved = response.choices[0].message.content
+                    improved = r_response.choices[0].message.content
                     st.text_area("Improved Resume", improved, height=300)
-                    st.download_button("Download as TXT", improved, file_name="improved_resume.txt")
+                    st.download_button(
+                        "Download as TXT", improved, file_name="improved_resume.txt"
+                    )
 
     with st.expander("📚 Smart Notes Maker"):
-        pdf_file = st.file_uploader("Upload PDF for notes", type=["pdf"], key="notes_pdf")
+        pdf_file = st.file_uploader(
+            "Upload PDF for notes", type=["pdf"], key="notes_pdf"
+        )
         if pdf_file:
-            text = extract_text_from_file(pdf_file)
+            notes_text = extract_text_from_file(pdf_file)
             if st.button("Generate Notes"):
                 with st.spinner("Creating revision notes..."):
-                    prompt = f"Summarize the following text and extract key points in a bullet list suitable for revision notes:\n\n{text[:5000]}"
-                    response = client.chat.completions.create(
+                    n_prompt = (
+                        "Summarize the following text and extract key points in a bullet list "
+                        "suitable for revision notes:\n\n" + notes_text[:5000]
+                    )
+                    n_response = client.chat.completions.create(
                         model=model,
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=[{"role": "user", "content": n_prompt}],
                         temperature=0.3,
                         max_tokens=1500
                     )
-                    notes = response.choices[0].message.content
+                    notes = n_response.choices[0].message.content
                     st.markdown(notes)
-                    st.download_button("Download Notes", notes, file_name="revision_notes.txt")
+                    st.download_button(
+                        "Download Notes", notes, file_name="revision_notes.txt"
+                    )
 
     st.divider()
 
@@ -1334,34 +1469,40 @@ with st.sidebar:
         st.subheader("Your Notes")
         new_note = st.text_area("Add a note")
         if st.button("Save Note"):
-            add_to_memory(new_note, "notes")
-            st.success("Note saved!")
+            if new_note.strip():
+                add_to_memory(new_note, "notes")
+                st.success("Note saved!")
 
         st.subheader("Facts / Study Materials")
         new_fact = st.text_area("Add a fact")
         if st.button("Save Fact"):
-            add_to_memory(new_fact, "facts")
-            st.success("Fact saved!")
+            if new_fact.strip():
+                add_to_memory(new_fact, "facts")
+                st.success("Fact saved!")
 
         if st.button("View All Memory"):
             st.write(st.session_state.memory)
 
     st.divider()
 
-    st.session_state.web_mode = st.checkbox("🌐 Real-Time Web Mode", value=st.session_state.web_mode)
+    st.session_state.web_mode = st.checkbox(
+        "🌐 Real-Time Web Mode", value=st.session_state.web_mode
+    )
     if st.session_state.web_mode:
-        st.info("Web mode is active – using hardcoded API keys.")
+        st.info("Web mode active – news & weather searches enabled.")
 
     st.divider()
 
     with st.expander("📊 Daily Usage"):
         today_str = date.today().isoformat()
-        usage_today = st.session_state.usage["daily"].get(today_str, {"messages": 0, "questions": 0, "time_seconds": 0})
+        usage_today = st.session_state.usage["daily"].get(
+            today_str, {"messages": 0, "questions": 0, "time_seconds": 0}
+        )
         st.write(f"Messages today: {usage_today['messages']}")
         st.write(f"Questions asked: {usage_today['questions']}")
         elapsed = int(time.time() - st.session_state.session_start)
         st.write(f"Time this session: {elapsed // 60} min {elapsed % 60} sec")
-        total_time = usage_today['time_seconds'] + elapsed
+        total_time = usage_today["time_seconds"] + elapsed
         st.write(f"Total time today: {total_time // 60} min {total_time % 60} sec")
 
     st.divider()
@@ -1370,192 +1511,192 @@ with st.sidebar:
     if st.button("Export current chat"):
         if export_format == "Markdown":
             md = export_chat_as_markdown(st.session_state.current)
-            st.download_button("Download Markdown", data=md, file_name="chat.md", mime="text/markdown")
+            st.download_button(
+                "Download Markdown", data=md, file_name="chat.md", mime="text/markdown"
+            )
         else:
             pdf_bytes = export_chat_as_pdf(st.session_state.current)
-            st.download_button("Download PDF", data=pdf_bytes, file_name="chat.pdf", mime="application/pdf")
+            st.download_button(
+                "Download PDF", data=pdf_bytes, file_name="chat.pdf", mime="application/pdf"
+            )
 
     st.divider()
     st.caption(f"Total messages: {st.session_state.usage['total_messages']}")
 
+
 # ===== MAIN CHAT AREA =====
 chat = st.session_state.chats[st.session_state.current]
 
-greeting = f"Welcome back, {chat['memory']['user_name']}!" if chat['memory']['user_name'] else "Welcome to Nova!"
-if st.session_state.emotion:
+greeting = (
+    f"Welcome back, {chat['memory']['user_name']}!"
+    if chat["memory"].get("user_name") else "Welcome to Nova!"
+)
+if st.session_state.emotion and st.session_state.emotion != "neutral":
     greeting += f" (Feeling {st.session_state.emotion})"
-st.markdown(f"<div class='chat-header'>✨ Nova AI <span style='font-size:16px;'>({greeting})</span></div>",
-            unsafe_allow_html=True)
 
-message_container = st.container()
+st.markdown(
+    f"<div class='chat-header'>✨ Nova AI "
+    f"<span style='font-size:16px;'>({greeting})</span></div>",
+    unsafe_allow_html=True
+)
 
-with message_container:
-    for idx, m in enumerate(chat["messages"]):
-        ts = m.get("timestamp", "")[:16] if "timestamp" in m else ""
-        if m["role"] == "user":
-            st.markdown(f"""
-            <div class="chat-message user">
-                <div class="bubble user-bubble">
-                    {m["content"]}
-                    <div class="timestamp">{ts}</div>
-                </div>
-                <div class="avatar">🧑‍💻</div>
+# ===== RENDER SAVED MESSAGES =====
+# FIX: Only render messages from session state history here.
+# The streaming placeholder (in run_stream) is cleared before rerun,
+# so there is never a case where both the placeholder and history show the same message.
+for idx, m in enumerate(chat["messages"]):
+    ts = m.get("timestamp", "")[:16]
+    if m["role"] == "user":
+        st.markdown(f"""
+        <div class="chat-message user">
+            <div class="bubble user-bubble">
+                {m["content"]}
+                <div class="timestamp">{ts}</div>
             </div>
-            """, unsafe_allow_html=True)
-        else:
-            # Assistant message bubble (without bookmark button inside)
-            safe_content = m["content"].replace('"', '&quot;').replace("'", "&#39;")
-            st.markdown(f"""
-            <div class="chat-message assistant">
-                <div class="avatar">✨</div>
-                <div class="bubble assistant-bubble">
-                    {m["content"]}
-                    <div class="timestamp">{ts}</div>
-                    <button class="copy-btn" onclick="copyToClipboard('{safe_content}')">📋 Copy</button>
-                </div>
+            <div class="avatar">🧑‍💻</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="chat-message assistant">
+            <div class="avatar">✨</div>
+            <div class="bubble assistant-bubble">
+                {m["content"]}
+                <div class="timestamp">{ts}</div>
             </div>
-            """, unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
-            # Add bookmark and copy buttons right below the bubble (reliable)
-            col1, col2, col3 = st.columns([8, 1, 1])
-            with col2:
-                if st.button("⭐", key=f"bookmark_{idx}"):
-                    st.session_state.bookmarks.append({
-                        "role": "Nova",
-                        "content": m["content"],
-                        "timestamp": m.get("timestamp", datetime.now().isoformat()),
-                        "chat_title": chat["title"]
-                    })
-                    save_bookmarks()
-                    st.success("Bookmarked!")
-            with col3:
-                if st.button("📋", key=f"copy_{idx}"):
-                    st.code(m["content"], language="text")
+        col1, col2, col3 = st.columns([8, 1, 1])
+        with col2:
+            if st.button("⭐", key=f"bookmark_{idx}", help="Bookmark this message"):
+                st.session_state.bookmarks.append({
+                    "role": "Nova",
+                    "content": m["content"],
+                    "timestamp": m.get("timestamp", datetime.now().isoformat()),
+                    "chat_title": chat["title"]
+                })
+                save_bookmarks()
+                st.success("Bookmarked!")
+        with col3:
+            if st.button("📋", key=f"copy_{idx}", help="Show copyable text"):
+                st.code(m["content"], language="text")
 
+# Regenerate button — only show after an assistant reply
 if chat["messages"] and chat["messages"][-1]["role"] == "assistant":
-    if st.button("🔄 Regenerate", help="Regenerate last response"):
+    if st.button("🔄 Regenerate last response"):
+        # Remove last assistant message, set flag, rerun
         chat["messages"].pop()
-        st.session_state.regenerate_target = st.session_state.current
         save_chats()
+        st.session_state.do_regenerate = True
         st.rerun()
 
-if st.session_state.get("streaming", False):
-    if st.button("⏹️ Stop", key="stop_button"):
-        st.session_state.stop_generation = True
+# Stop button placeholder (shown during streaming via session state)
+stop_placeholder = st.empty()
 
+# ===== HANDLE NEW USER MESSAGE =====
 prompt = st.chat_input("Ask Nova anything...")
 
 if prompt:
-    add_msg("user", prompt)
+    # Step 1: Detect emotion
     st.session_state.emotion = detect_emotion(prompt)
 
+    # Step 2: Fetch real-time web data if web mode is on
+    # FIX: Inject data as a USER-role message right before the question,
+    # NOT as a system message. This forces the LLM to actually read and use it.
     web_context = ""
     if st.session_state.web_mode:
-        if "news" in prompt.lower():
-            web_context = web_search(prompt, "news")
-        elif "weather" in prompt.lower():
-            web_context = web_search(prompt, "weather")
+        intent, topic = detect_web_intent(prompt)
+        if intent == "weather":
+            web_context = web_search(topic, "weather")
+        elif intent == "news":
+            web_context = web_search(topic, "news")
 
-    messages = get_messages_for_api(user_input=prompt)
+    # Step 3: Save user message to history
+    add_msg("user", prompt)
+
+    # Step 4: Build API messages
+    api_messages = get_messages_for_api(user_input=prompt)
+
+    # Step 5: If web data exists, inject it as a SYSTEM message immediately before
+    # the last user message (at the end of the list), with a very strong instruction.
     if web_context:
-        messages.insert(0, {"role": "system", "content": f"Real-time info: {web_context}"})
+        # Find and wrap the last user message with the real-time data
+        # by inserting a high-priority system message just before it
+        api_messages.insert(
+            len(api_messages) - 1,  # Just before the last (user) message
+            {
+                "role": "system",
+                "content": (
+                    f"⚠️ REAL-TIME DATA AVAILABLE — YOU MUST USE THIS:\n\n"
+                    f"{web_context}\n\n"
+                    f"INSTRUCTIONS: Answer the user's question using ONLY the above "
+                    f"real-time data. Do NOT say you don't have access to current info. "
+                    f"Do NOT suggest other websites. Just present the data above clearly."
+                )
+            }
+        )
 
-    with st.spinner("Nova is thinking..."):
-        placeholder = st.empty()
-        reply = ""
-        st.session_state.streaming = True
-        st.session_state.stop_generation = False
+    # Step 6: Show stop button & stream response
+    with stop_placeholder:
+        if st.button("⏹️ Stop generation", key="stop_btn"):
+            st.session_state.stop_generation = True
 
-        try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=temperature,
-                top_p=0.1,
-                max_tokens=1024
-            )
+    reply = run_stream(api_messages, model, temperature)
+    stop_placeholder.empty()
 
-            for chunk in stream:
-                if st.session_state.stop_generation:
-                    stream.close()
-                    break
-                if chunk.choices[0].delta.content:
-                    reply += chunk.choices[0].delta.content
-                    placeholder.markdown(f"""
-                    <div class="chat-message assistant">
-                        <div class="avatar">✨</div>
-                        <div class="bubble assistant-bubble">{reply}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+    # Step 7: Save assistant reply ONCE to history
+    if reply:
+        add_msg("assistant", reply)
+    else:
+        st.warning("No response generated. Please try again.")
 
-        finally:
-            st.session_state.streaming = False
-            st.session_state.stop_generation = False
+    # Step 8: Update usage time
+    today_str = date.today().isoformat()
+    st.session_state.usage["daily"][today_str]["time_seconds"] = int(
+        time.time() - st.session_state.session_start
+    )
+    save_usage()
 
-        if reply.strip():
+    # Step 9: Rerun — placeholder was cleared, so only history renders = no duplicate
+    st.rerun()
+
+
+# ===== HANDLE REGENERATE =====
+# FIX: Simple do_regenerate flag instead of complex multi-flag state machine.
+if st.session_state.get("do_regenerate"):
+    st.session_state.do_regenerate = False
+
+    # Find the last user message
+    last_user_msg = None
+    for m in reversed(chat["messages"]):
+        if m["role"] == "user":
+            last_user_msg = m["content"]
+            break
+
+    if last_user_msg:
+        api_messages = get_messages_for_api(user_input=last_user_msg)
+
+        with stop_placeholder:
+            if st.button("⏹️ Stop generation", key="stop_regen_btn"):
+                st.session_state.stop_generation = True
+
+        reply = run_stream(api_messages, model, temperature)
+        stop_placeholder.empty()
+
+        if reply:
             add_msg("assistant", reply)
         else:
             st.warning("No response generated. Please try again.")
 
-    today_str = date.today().isoformat()
-    st.session_state.usage["daily"][today_str]["time_seconds"] = int(time.time() - st.session_state.session_start)
-    save_usage()
-
-    st.rerun()
-
-if st.session_state.get("regenerate_target") == st.session_state.current:
-    st.session_state.regenerate_target = None
-    last_user = None
-    for m in reversed(chat["messages"]):
-        if m["role"] == "user":
-            last_user = m["content"]
-            break
-    if last_user:
-        st.session_state.regenerate_prompt = last_user
         st.rerun()
 
-if "regenerate_prompt" in st.session_state:
-    prompt = st.session_state.pop("regenerate_prompt")
-    messages = get_messages_for_api(user_input=prompt)
-    with st.spinner("Nova is thinking..."):
-        placeholder = st.empty()
-        reply = ""
-        st.session_state.streaming = True
-        st.session_state.stop_generation = False
 
-        try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=temperature,
-                top_p=0.1,
-                max_tokens=1024
-            )
-
-            for chunk in stream:
-                if st.session_state.stop_generation:
-                    stream.close()
-                    break
-                if chunk.choices[0].delta.content:
-                    reply += chunk.choices[0].delta.content
-                    placeholder.markdown(f"""
-                    <div class="chat-message assistant">
-                        <div class="avatar">✨</div>
-                        <div class="bubble assistant-bubble">{reply}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-        finally:
-            st.session_state.streaming = False
-            st.session_state.stop_generation = False
-
-        if reply.strip():
-            add_msg("assistant", reply)
-    st.rerun()
-
+# ===== FOOTER =====
 st.markdown(
-    "<center style='opacity:.4;margin-top:20px'>Nova Advanced • Persistent Storage • Smart PDF Q&A • Themes • Export • Bookmarks • Memory • Web Mode • Emotion AI</center>",
+    "<center style='opacity:.4;margin-top:20px'>"
+    "Nova Advanced • Persistent Storage • Smart PDF Q&A • "
+    "Themes • Export • Bookmarks • Memory • Web Mode • Emotion AI"
+    "</center>",
     unsafe_allow_html=True
 )
