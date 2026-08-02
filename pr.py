@@ -668,7 +668,7 @@ st.set_page_config(
 )
 
 # ===== GROQ API KEY =====
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 client = Groq(api_key=GROQ_API_KEY)
 
 # ===== CONSTANTS =====
